@@ -80,7 +80,7 @@ function buildSlideEl(slide, config) {
 
   if (slide.type === "video") {
     el.innerHTML = `
-      <video class="slide-media" src="${slide.media_url}" muted loop playsinline preload="metadata"></video>
+      <video class="slide-media" src="${slide.media_url}" muted playsinline preload="metadata"></video>
       <button class="mute-toggle" aria-label="Sound on/off">🔇</button>
       ${slide.caption ? `<div class="slide-overlay"><p class="slide-caption">${escapeHTML(slide.caption)}</p></div>` : ""}
     `;
@@ -119,9 +119,12 @@ function renderDots(count) {
 }
 
 /* Plays the video in the slide currently filling most of the screen, pauses
-   all others — and keeps the side dots in sync with scroll position. */
+   all others — and keeps the side dots in sync with scroll position.
+   Returns a small state object so other code (the auto-scroll timer) always
+   knows which slide is actually on screen right now. */
 function wireViewportBehavior(container, slideEls) {
   const dots = document.querySelectorAll(".dot");
+  const state = { currentIndex: 0 };
 
   const observer = new IntersectionObserver(
     (entries) => {
@@ -130,11 +133,15 @@ function wireViewportBehavior(container, slideEls) {
         const video = entry.target.querySelector("video");
 
         if (entry.isIntersecting && entry.intersectionRatio > 0.6) {
+          state.currentIndex = index;
           if (dots[index]) {
             dots.forEach(d => d.classList.remove("is-active"));
             dots[index].classList.add("is-active");
           }
-          if (video) video.play().catch(() => {});
+          if (video) {
+            video.currentTime = 0;
+            video.play().catch(() => {});
+          }
         } else if (video) {
           video.pause();
         }
@@ -144,6 +151,38 @@ function wireViewportBehavior(container, slideEls) {
   );
 
   slideEls.forEach(el => observer.observe(el));
+  return state;
+}
+
+/* ==========================================================================
+   Auto-scroll — moves to the next slide every 2.5s on its own.
+   - Pauses for a few seconds the moment the person scrolls by hand (wheel /
+     touch), so it never fights a manual swipe.
+   - On a video slide, it waits for that video to actually finish playing
+     before moving on, instead of cutting it off mid-way.
+   ========================================================================== */
+function startAutoScroll(container, slideEls, viewportState) {
+  const INTERVAL_MS = 2500;
+  const MANUAL_PAUSE_MS = 4000;
+  let pausedUntil = 0;
+
+  const pauseAutoScroll = () => { pausedUntil = Date.now() + MANUAL_PAUSE_MS; };
+  // wheel/touchmove only fire on direct user input — unlike "scroll", they
+  // are never triggered by our own scrollIntoView() call below, so this
+  // can't create a feedback loop that pauses the timer forever.
+  container.addEventListener("wheel", pauseAutoScroll, { passive: true });
+  container.addEventListener("touchmove", pauseAutoScroll, { passive: true });
+
+  setInterval(() => {
+    if (Date.now() < pausedUntil) return;
+
+    const currentEl = slideEls[viewportState.currentIndex];
+    const video = currentEl && currentEl.querySelector("video");
+    if (video && !video.paused && !video.ended) return; // let the video finish first
+
+    const nextIndex = (viewportState.currentIndex + 1) % slideEls.length;
+    slideEls[nextIndex].scrollIntoView({ behavior: "smooth" });
+  }, INTERVAL_MS);
 }
 
 /* ==========================================================================
@@ -170,7 +209,8 @@ async function init() {
     });
 
     renderDots(slideEls.length);
-    wireViewportBehavior(scrollEl, slideEls);
+    const viewportState = wireViewportBehavior(scrollEl, slideEls);
+    startAutoScroll(scrollEl, slideEls, viewportState);
   } catch (err) {
     console.error(err);
     scrollEl.innerHTML = `<div class="loading">લોડ કરવામાં તકલીફ — ઈન્ટરનેટ ચેક કરો અથવા ફરી પ્રયત્ન કરો</div>`;
